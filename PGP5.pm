@@ -3,11 +3,11 @@
 # Crypt::PGP5 - A module for accessing PGP 5 functionality.
 # Copyright (c) 1999-2000 Ashish Gulhati <hash@netropolis.org>
 #
-# All rights reserved. This program is free software; you can
+# All rights reserved. This code is free software; you can
 # redistribute it and/or modify it under the same terms as Perl
 # itself.
 #
-# $Id: PGP5.pm,v 1.25 2000/06/26 13:17:47 cvs Exp $
+# $Id: PGP5.pm,v 1.28 2000/07/13 10:44:10 cvs Exp $
 
 package Crypt::PGP5;
 
@@ -26,6 +26,7 @@ Crypt::PGP5 - A module for accessing PGP 5 functionality.
   $pgp->passphrase ($passphrase);        # Set passphrase.
   $pgp->armor ($boolean);                # Switch ASCII armoring on or off.
   $pgp->detach ($boolean);               # Switch detached signatures on or off.
+  $pgp->encryptsafe ($boolean);          # Switch encryption to untrusted keys on or off.
   $pgp->version ($versionstring);        # Set version string
   $pgp->debug ($boolean);                # Switch debugging output on or off.
 
@@ -64,7 +65,7 @@ use POSIX qw(tmpnam);
 use vars qw($VERSION);
 use Time::HiRes qw (sleep);
 
-( $VERSION ) = '$Revision: 1.25 $' =~ /\s+([\d\.]+)/;
+( $VERSION ) = '$Revision: 1.28 $' =~ /\s+([\d\.]+)/;
 
 =pod
 
@@ -84,6 +85,7 @@ sub new {
   bless { PASSPHRASE     =>   0,
 	  ARMOR          =>   1,
 	  DETACH         =>   1,
+	  ENCRYPTSAFE    =>   1,
 	  SECRETKEY      =>   0,
 	  DEBUG          =>   1,
 	  VERSION        =>   "Version: Crypt::PGP5 v$VERSION",
@@ -115,7 +117,14 @@ ascii-armoring. I haven't tested this without ASCII armoring yet.
 =item B<detach ()>
 
 Sets the B<DETACH> instance variable. If set to 1, the sign method
-will produce detached signature certificates, else it won't.
+will produce detached signature certificates, else it won't. The
+default is to produce detached signatures.
+
+=item B<encryptsafe ()>
+
+Sets the B<ENCRYPTSAFE> instance variable. If set to 1, encryption
+will fail if trying to encrypt to a key which is not trusted. This is
+the default. Switch to 0 if you want to encrypt to untrusted keys.
 
 =item B<version ()>
 
@@ -133,7 +142,8 @@ Crypt::PGP5's interaction with the PGP binary to be dumped to STDOUT.
 
 sub AUTOLOAD {
   my $self = shift; my $auto = $AUTOLOAD; $auto =~ s/.*:://;
-  $auto =~ /^(passphrase|secretkey|armor|detach|version|debug)$/ and $self->{"\U$auto"} = shift;
+  $auto =~ /^(passphrase|secretkey|armor|detach|encryptsafe|version|debug)$/ 
+    and $self->{"\U$auto"} = shift;
 }
 
 =pod
@@ -163,7 +173,7 @@ sub sign {
   $expect->expect (undef, '-re', 'phrase is good.\s*', '-re', 'pass phrase:\s*');
   return undef if ($expect->exp_match_number==2);
   sleep (0.2); $expect->expect (undef); my $info = $expect->exp_before(); 
-  $info =~ s/\r\n/\n/sg; $info =~ s/^Version:.*/$self->{VERSION}/; return $info;
+  $info =~ s/\r//sg; $info =~ s/^Version:.*/$self->{VERSION}/m; return $info;
 }
 
 =pod
@@ -182,14 +192,16 @@ sub verify {
   do { $tmpnam = tmpnam() } until sysopen(FH, $tmpnam, O_RDWR|O_CREAT|O_EXCL);
   print FH join '',@_; close FH;
   my $expect = Expect->spawn ("pgpv $tmpnam -o-"); $expect->log_stdout($self->{DEBUG});
-  $expect->expect (undef, '-re', 'type binary.\s*', '-re', 'pass phrase:\s*');
+  $expect->expect (undef, '-re', 'type binary.\s*', '-re', 'pass phrase:\s*',
+		          '-re', 'File to check signature against');
+  unlink $tmpnam, return undef if ($expect->exp_match_number==3);
   if ($expect->exp_match_number==2) {
     sleep (0.2); print $expect "$self->{PASSPHRASE}\r";
     $expect->expect (undef, '-re', 'type binary.\s*', '-re', 'pass phrase:\s*');
     unlink $tmpnam, return undef if ($expect->exp_match_number==2)
   }
   sleep (0.2); $expect->expect (undef); my $info = $expect->exp_before(); unlink $tmpnam;
-  $info =~ s/\r\n/\n/sg; my $trusted = ($info !~ /WARNING: The signing key is not trusted/s);
+  $info =~ s/\r//sg; my $trusted = ($info !~ /WARNING: The signing key is not trusted/s);
   return (undef, $info) 
     unless $info =~ /^(.*)(Good|BAD)\ signature\ made\ (\S+\s+\S+\s+\S+)\ by\ key:
 	             \s+(\S+)\s+bits,\ Key\ ID\ (\S+),\ Created\ (\S+)\s+\"([^\"]+)\"/sx;
@@ -212,7 +224,8 @@ on the message, along with a string containing the plaintext message.
 sub dverify {
   my $self = shift;
   my $message = join '', @{$_[0]}; my $sign = join '', @{$_[1]};
-  # $message =~ s/\n/\r\n/sg;
+  $message .= "\n" unless $message =~ /\n$/s;
+# $message =~ s/\n/\r\n/sg;
   my $tmpnam; do { $tmpnam = tmpnam() } until sysopen(FH, $tmpnam, O_RDWR|O_CREAT|O_EXCL);
   my $tmpnam2; do { $tmpnam2 = tmpnam() } until sysopen(FH2, $tmpnam2, O_RDWR|O_CREAT|O_EXCL);
   print FH $sign; close FH; print FH2 $message; close FH2;
@@ -264,14 +277,30 @@ recipients.
 =cut
 
 sub encrypt {
-  my $self = shift; my $recipients = shift;
+  my $self = shift; my $recipients = shift; my $info = '';
   my $armor = "-a" if $self->{ARMOR}; my $rcpts = join ( ' ', map "-r$_", @{ $recipients } );
   my $expect = Expect->spawn ("pgpe $armor $rcpts"); $expect->log_stdout($self->{DEBUG});
   my $message = join ('',@_); $message .= "\n" unless $message =~ /\n$/s; 
   $expect->expect (undef, "No files specified."); sleep (0.2); print $expect ("$message\x04"); 
-  $message =~ /(\S*)\s*$/s; $expect->expect (undef, $1); sleep (0.2); $expect->expect (undef); 
-  my $info = $expect->exp_before(); $info =~ s/.*\n(-----BEGIN)/$1/s;
-  $info =~ s/\r\n/\n/sg; $info =~ s/^Version:.*/$self->{VERSION}/; return $info;
+  $message =~ /(\S*)\s*$/s; $expect->expect (undef, $1);
+  $expect->expect (undef, '-----BEGIN PGP', 'key with this name? [y/N]');
+  if ($expect->exp_match_number==2) {
+    sleep (0.2);
+    if ($self->{ENCRYPTSAFE}) {
+      print $expect "n\n";
+      $expect->expect (undef);
+      return undef;
+    }
+    else {
+      print $expect "y\n";
+    }	
+  }
+  else {
+    $info = $expect->exp_match();
+  }
+  sleep (0.2); $expect->expect (undef);
+  $info .= $expect->exp_before(); $info =~ s/.*\n(-----BEGIN)/$1/s;
+  $info =~ s/\r//sg; $info =~ s/^Version:.*/$self->{VERSION}/m; return $info;
 }
 
 =pod
@@ -470,7 +499,7 @@ sub extractkey {
   my $expect = Expect->spawn ("pgpk -x $armor \"$userid\" $keyring 2>/dev/null"); 
   $expect->log_stdout($self->{DEBUG});
   sleep (0.2); $expect->expect (undef); my $info = $expect->exp_before();
-  $info =~ s/\r//sg; $info =~ s/^Version:.*/$self->{VERSION}/; split /\n/, $info; 
+  $info =~ s/\r//sg; $info =~ s/^Version:.*/$self->{VERSION}/m; split /\n/, $info; 
 }
 
 =pod
@@ -543,16 +572,16 @@ Crypt::PGP5 is Copyright (c) 1999-2000 Ashish Gulhati
 
 =head1 ACKNOWLEDGEMENTS
 
-Thanks to my wife, Barkha, for support and inspiration; to Raj Mathur,
-my Unix mentor; to Rex Rogers at Laissez Faire City (www.lfcity.com)
-for putting together a great environment to hack on freedom
-technologies; and of-course, to Phil Zimmerman, Larry Wall, Richard
-Stallman, and Linus Torvalds.
+Thanks to Barkha for inspiration and lots of laughs; to Raj Mathur, my
+Unix mentor; to Rex Rogers at Laissez Faire City (www.lfcity.com) for
+putting together a great environment to hack on freedom technologies;
+and of-course, to Phil Zimmerman, Larry Wall, Richard Stallman, and
+Linus Torvalds.
 
 =head1 LICENSE
 
-This program is free software; you can redistribute it and/or modify
-it under the same terms as Perl itself.
+This code is free software; you can redistribute it and/or modify it
+under the same terms as Perl itself.
 
 It would be nice if you would mail your patches to me, and I would
 love to hear about projects that make use of this module.
