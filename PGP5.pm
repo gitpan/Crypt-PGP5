@@ -7,7 +7,7 @@
 # redistribute it and/or modify it under the same terms as Perl
 # itself.
 #
-# $Id: PGP5.pm,v 1.34 2000/07/28 11:17:24 cvs Exp $
+# $Id: PGP5.pm,v 1.37 2000/10/04 09:49:47 cvs Exp $
 
 package Crypt::PGP5;
 
@@ -15,7 +15,7 @@ package Crypt::PGP5;
 
 =head1 NAME 
 
-Crypt::PGP5 - A module for accessing PGP 5 functionality.
+Crypt::PGP5 - An Object Oriented Interface to PGP5.
 
 =head1 SYNOPSIS
 
@@ -68,7 +68,7 @@ use POSIX qw( tmpnam );
 use vars qw( $VERSION $AUTOLOAD );
 use Time::HiRes qw( sleep );
 
-( $VERSION ) = '$Revision: 1.34 $' =~ /\s+([\d\.]+)/;
+( $VERSION ) = '$Revision: 1.37 $' =~ /\s+([\d\.]+)/;
 
 =pod
 
@@ -91,7 +91,7 @@ sub new {
 	  ENCRYPTSAFE    =>   1,
 	  SECRETKEY      =>   0,
 	  DEBUG          =>   1,
-	  VERSION        =>   "Version: Crypt::PGP5 v$VERSION",
+	  VERSION        =>   "Version: Crypt::PGP5 v$VERSION\n",
 	}, shift;
 }
 
@@ -181,7 +181,7 @@ sub sign {
   $expect->expect (undef, '-re', 'phrase is good.\s*', '-re', 'pass phrase:\s*');
   return undef if ($expect->exp_match_number==2);
   sleep (0.2); $expect->expect (undef); my $info = $expect->exp_before(); 
-  $info =~ s/\r//sg; $info =~ s/^Version:.*/$self->{VERSION}/m; return $info;
+  $info =~ s/\r//sg; $info =~ s/^Version:.*\n/$self->{VERSION}/m; return $info;
 }
 
 =pod
@@ -229,7 +229,7 @@ on the message, along with a string containing the plaintext message.
 
 =cut
 
-sub dverify {
+sub dverify { # TODO **** TODO ******* Merge this into verify() ******* TODO **** TODO
   my $self = shift;
   my $message = join '', @{$_[0]}; my $sign = join '', @{$_[1]};
   $message .= "\n" unless $message =~ /\n$/s;
@@ -292,24 +292,27 @@ sub encrypt {
   print FH $message; close FH;
   my $expect = Expect->spawn ("pgpe $tmpnam $armor -o- $rcpts"); 
   $expect->log_stdout($self->{DEBUG});
-  $expect->expect (undef, '-----BEGIN PGP', 'key with this name? [y/N]', 'No valid keys');
-  if ($expect->exp_match_number==2) {
-    sleep (0.2);
-    if ($self->{ENCRYPTSAFE}) {
-      print $expect "n\n";
-      $expect->expect (undef);
+  while (1) {
+    $expect->expect (undef, '-----BEGIN PGP', 'key with this name? [y/N]', 'No valid keys');
+    if ($expect->exp_match_number==2) {
+      sleep (0.2);
+      if ($self->{ENCRYPTSAFE}) {
+	print $expect "n\n";
+	$expect->expect (undef);
+	return undef;
+      }
+      else {
+	print $expect "y\n";
+      }	
+    }
+    elsif ($expect->exp_match_number==3) {
+      unlink $tmpnam;
       return undef;
     }
     else {
-      print $expect "y\n";
-    }	
-  }
-  elsif ($expect->exp_match_number==3) {
-    unlink $tmpnam;
-    return undef;
-  }
-  else {
-    $info = $expect->exp_match();
+      $info = $expect->exp_match();
+      last;
+    }
   }
   sleep (0.2); $expect->expect (undef);
   $info .= $expect->exp_before(); $info =~ s/.*\n(-----BEGIN)/$1/s;
@@ -562,6 +565,8 @@ sub keygen {
 
 =pod
 
+=back
+
 =head1 BUGS
 
 =over 2
@@ -590,6 +595,8 @@ The current implementation will probably eat up all your RAM if you
 try to operate on huge messages. In future versions, this will be
 addressed by reading from and returning filehandles, rather than using
 in-core data.
+
+=back
 
 =head1 AUTHOR
 
