@@ -7,7 +7,7 @@
 # redistribute it and/or modify it under the same terms as Perl
 # itself.
 #
-# $Id: PGP5.pm,v 1.28 2000/07/13 10:44:10 cvs Exp $
+# $Id: PGP5.pm,v 1.34 2000/07/28 11:17:24 cvs Exp $
 
 package Crypt::PGP5;
 
@@ -22,13 +22,13 @@ Crypt::PGP5 - A module for accessing PGP 5 functionality.
   use Crypt::PGP5;
   $pgp = new Crypt::PGP5;
 
-  $pgp->secretkey ($keyid);              # Set numeric or symbolic ID of default secret key.
-  $pgp->passphrase ($passphrase);        # Set passphrase.
-  $pgp->armor ($boolean);                # Switch ASCII armoring on or off.
-  $pgp->detach ($boolean);               # Switch detached signatures on or off.
-  $pgp->encryptsafe ($boolean);          # Switch encryption to untrusted keys on or off.
-  $pgp->version ($versionstring);        # Set version string
-  $pgp->debug ($boolean);                # Switch debugging output on or off.
+  $pgp->secretkey ($keyid);        # Set ID of default secret key.
+  $pgp->passphrase ($passphrase);  # Set passphrase.
+  $pgp->armor ($boolean);          # Switch ASCII armoring on/off.
+  $pgp->detach ($boolean);         # Switch detached signatures on/off.
+  $pgp->encryptsafe ($boolean);    # Switch paranoid encryption on/off.
+  $pgp->version ($versionstring);  # Set version string.
+  $pgp->debug ($boolean);          # Switch debugging output on/off.
 
   $signed = $pgp->sign (@message);
   @recipients = $pgp->msginfo (@ciphertext);
@@ -43,10 +43,11 @@ Crypt::PGP5 - A module for accessing PGP 5 functionality.
   $pgp->delkey ($keyid);
   $pgp->disablekey ($keyid);
   $pgp->enablekey ($keyid);
-  @keys = $pgp->keyinfo (@uids);
+  @keys = $pgp->keyinfo (@ids);
   $keystring = $pgp->extractkey ($userid, $keyring);
   $pgp->keypass ($keyid, $oldpasswd, $newpasswd);
-  $status = $pgp->keygen ($name, $email, $keytype, $keysize, $expire, $pass);
+  $status = $pgp->keygen 
+    ($name, $email, $keytype, $keysize, $expire, $pass);
 
 =head1 DESCRIPTION
 
@@ -58,14 +59,16 @@ functions.
 
 =cut
 
+use Carp;
 use 5.005;
 use Fcntl;
 use Expect;
-use POSIX qw(tmpnam);
-use vars qw($VERSION);
-use Time::HiRes qw (sleep);
+use strict;
+use POSIX qw( tmpnam );
+use vars qw( $VERSION $AUTOLOAD );
+use Time::HiRes qw( sleep );
 
-( $VERSION ) = '$Revision: 1.28 $' =~ /\s+([\d\.]+)/;
+( $VERSION ) = '$Revision: 1.34 $' =~ /\s+([\d\.]+)/;
 
 =pod
 
@@ -141,9 +144,14 @@ Crypt::PGP5's interaction with the PGP binary to be dumped to STDOUT.
 =cut
 
 sub AUTOLOAD {
-  my $self = shift; my $auto = $AUTOLOAD; $auto =~ s/.*:://;
-  $auto =~ /^(passphrase|secretkey|armor|detach|encryptsafe|version|debug)$/ 
-    and $self->{"\U$auto"} = shift;
+  my $self = shift; (my $auto = $AUTOLOAD) =~ s/.*:://;
+  if ($auto =~ /^(passphrase|secretkey|armor|
+                  detach|encryptsafe|version|debug)$/x) {
+    $self->{"\U$auto"} = shift;
+  }
+  else {
+    croak "Could not AUTOLOAD method $auto.";
+  }
 }
 
 =pod
@@ -277,13 +285,14 @@ recipients.
 =cut
 
 sub encrypt {
-  my $self = shift; my $recipients = shift; my $info = '';
+  my $self = shift; my $recipients = shift; my $info = ''; my $tmpnam;
   my $armor = "-a" if $self->{ARMOR}; my $rcpts = join ( ' ', map "-r$_", @{ $recipients } );
-  my $expect = Expect->spawn ("pgpe $armor $rcpts"); $expect->log_stdout($self->{DEBUG});
+  do { $tmpnam = tmpnam() } until sysopen(FH, $tmpnam, O_RDWR|O_CREAT|O_EXCL);
   my $message = join ('',@_); $message .= "\n" unless $message =~ /\n$/s; 
-  $expect->expect (undef, "No files specified."); sleep (0.2); print $expect ("$message\x04"); 
-  $message =~ /(\S*)\s*$/s; $expect->expect (undef, $1);
-  $expect->expect (undef, '-----BEGIN PGP', 'key with this name? [y/N]');
+  print FH $message; close FH;
+  my $expect = Expect->spawn ("pgpe $tmpnam $armor -o- $rcpts"); 
+  $expect->log_stdout($self->{DEBUG});
+  $expect->expect (undef, '-----BEGIN PGP', 'key with this name? [y/N]', 'No valid keys');
   if ($expect->exp_match_number==2) {
     sleep (0.2);
     if ($self->{ENCRYPTSAFE}) {
@@ -295,11 +304,16 @@ sub encrypt {
       print $expect "y\n";
     }	
   }
+  elsif ($expect->exp_match_number==3) {
+    unlink $tmpnam;
+    return undef;
+  }
   else {
     $info = $expect->exp_match();
   }
   sleep (0.2); $expect->expect (undef);
   $info .= $expect->exp_before(); $info =~ s/.*\n(-----BEGIN)/$1/s;
+  unlink $tmpnam;
   $info =~ s/\r//sg; $info =~ s/^Version:.*/$self->{VERSION}/m; return $info;
 }
 
@@ -320,7 +334,7 @@ sub addkey {
   print FH $key; close FH; my $reallyadd=$pretend?'n':'y';
   my $expect = Expect->spawn ("pgpk -a $tmpnam"); $expect->log_stdout($self->{DEBUG});
   $expect->expect (undef, '-re', '(Unable|to your)');
-  $x = $expect->exp_match(); return undef unless $x =~ /to your/; print "$x\n";
+  my $x = $expect->exp_match(); return undef unless $x =~ /to your/; print "$x\n";
   my $info = $expect->exp_before(); sleep (0.2); print $expect ("$reallyadd\r");
   sleep (0.2); $expect->expect (undef); unlink $tmpnam;
   $info =~ s/.*Key ring:[^\n]*\n(.*found\s*\n).*/$1/s; my @r = split (/\r\n?/, $info); 
@@ -386,10 +400,10 @@ keyids listed in B<@keyids>.
 =cut
 
 sub keyinfo {
-  my $self = shift; my $ids = join '|',@_; 
-  print "$ids\n"; my @keylist = `pgpk -ll 2>/dev/null`; 
+  my $self = shift; my $ids = join '|',@_;
+  my @keylist = `pgpk -ll 2>/dev/null`; 
   return (parsekeys (@keylist)) unless $ids;
-  my @return = grep { $_->{ID} =~ /^($ids)$/ or $_->{ID2} =~ /^$ids$/ } parsekeys (@keylist);
+  return grep { $_->{ID} =~ /^($ids)$/ or $_->{ID2} =~ /^($ids)$/ } parsekeys (@keylist);
 }
 
 =pod
@@ -494,8 +508,8 @@ public keyring set with B<pubring ()>.
 =cut
 
 sub extractkey {
-  my $self = shift; my $userid = shift; my $keyring = shift; 
-  $keyring = "-o $keyring" if $keyring;
+  my $self = shift; my $userid = shift; my $keyring = shift; my $armor = '';
+  $keyring = "-o $keyring" if $keyring; $armor = "-a" if $self->{ARMOR}; 
   my $expect = Expect->spawn ("pgpk -x $armor \"$userid\" $keyring 2>/dev/null"); 
   $expect->log_stdout($self->{DEBUG});
   sleep (0.2); $expect->expect (undef); my $info = $expect->exp_before();
@@ -518,7 +532,7 @@ you read an EOF from the returned filehandle.
 
 sub keygen {
   my $self = shift; my ($name, $email, $keytype, $keysize, $expire, $pass) = @_;
-  $pid = open(PGP, "-|");
+  my $pid = open(PGP, "-|");
   return undef unless (defined $pid);
   if ($pid) {
     $SIG{CHLD} = 'IGNORE';
@@ -550,17 +564,29 @@ sub keygen {
 
 =head1 BUGS
 
-* Error checking needs work. 
+=over 2
 
-* Some key manipulation functions are missing. 
+=item * 
 
-* May not work with versions of PGP other than PGPfreeware 5.0i. 
+Error checking needs work. 
 
-* The method call interface is subject to change in future versions,
+=item * 
+
+Some key manipulation functions are missing. 
+
+=item * 
+
+May not work with versions of PGP other than PGPfreeware 5.0i. 
+
+=item * 
+
+The method call interface is subject to change in future versions,
 specifically, key manipulation methods will be encapsulated into the
 Crypt::PGP5::Key class in a future version.
 
-* The current implementation will probably eat up all your RAM if you
+=item * 
+
+The current implementation will probably eat up all your RAM if you
 try to operate on huge messages. In future versions, this will be
 addressed by reading from and returning filehandles, rather than using
 in-core data.
@@ -572,11 +598,10 @@ Crypt::PGP5 is Copyright (c) 1999-2000 Ashish Gulhati
 
 =head1 ACKNOWLEDGEMENTS
 
-Thanks to Barkha for inspiration and lots of laughs; to Raj Mathur, my
-Unix mentor; to Rex Rogers at Laissez Faire City (www.lfcity.com) for
-putting together a great environment to hack on freedom technologies;
-and of-course, to Phil Zimmerman, Larry Wall, Richard Stallman, and
-Linus Torvalds.
+Thanks to Barkha for inspiration and lots of laughs; to Rex Rogers at
+Laissez Faire City for putting together a great environment to hack on
+freedom technologies; and of-course, to Phil Zimmerman, Larry Wall,
+Richard Stallman, and Linus Torvalds.
 
 =head1 LICENSE
 
