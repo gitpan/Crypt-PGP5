@@ -7,7 +7,7 @@
 # redistribute it and/or modify it under the same terms as Perl
 # itself.
 #
-# $Id: PGP5.pm,v 1.37 2000/10/04 09:49:47 cvs Exp $
+# $Id: PGP5.pm,v 1.38 2000/10/13 14:56:54 cvs Exp $
 
 package Crypt::PGP5;
 
@@ -68,7 +68,7 @@ use POSIX qw( tmpnam );
 use vars qw( $VERSION $AUTOLOAD );
 use Time::HiRes qw( sleep );
 
-( $VERSION ) = '$Revision: 1.37 $' =~ /\s+([\d\.]+)/;
+( $VERSION ) = '$Revision: 1.38 $' =~ /\s+([\d\.]+)/;
 
 =pod
 
@@ -317,7 +317,7 @@ sub encrypt {
   sleep (0.2); $expect->expect (undef);
   $info .= $expect->exp_before(); $info =~ s/.*\n(-----BEGIN)/$1/s;
   unlink $tmpnam;
-  $info =~ s/\r//sg; $info =~ s/^Version:.*/$self->{VERSION}/m; return $info;
+  $info =~ s/\r//sg; $info =~ s/^Version:.*\n/$self->{VERSION}/m; return $info;
 }
 
 =pod
@@ -516,7 +516,7 @@ sub extractkey {
   my $expect = Expect->spawn ("pgpk -x $armor \"$userid\" $keyring 2>/dev/null"); 
   $expect->log_stdout($self->{DEBUG});
   sleep (0.2); $expect->expect (undef); my $info = $expect->exp_before();
-  $info =~ s/\r//sg; $info =~ s/^Version:.*/$self->{VERSION}/m; split /\n/, $info; 
+  $info =~ s/\r//sg; $info =~ s/^Version:.*\n/$self->{VERSION}/m; split /\n/, $info; 
 }
 
 =pod
